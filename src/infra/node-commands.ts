@@ -2,6 +2,7 @@ export const NODE_SYSTEM_RUN_COMMANDS = [
   "system.run.prepare",
   "system.run",
   "system.which",
+  "context.history.fetch",
 ] as const;
 
 export const NODE_SYSTEM_NOTIFY_COMMAND = "system.notify";

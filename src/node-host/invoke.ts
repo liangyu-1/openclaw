@@ -1,7 +1,11 @@
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { loadConfig } from "../config/config.js";
 import { GatewayClient } from "../gateway/client.js";
+import { stripEnvelopeFromMessages } from "../gateway/chat-sanitize.js";
+import { resolveSessionKeyFromResolveParams } from "../gateway/sessions-resolve.js";
+import { loadSessionEntry, readSessionMessages } from "../gateway/session-utils.js";
 import {
   ensureExecApprovals,
   mergeExecApprovalsSocketDefaults,
@@ -55,6 +59,12 @@ type SystemWhichParams = {
 type SystemExecApprovalsSetParams = {
   file: ExecApprovalsFile;
   baseHash?: string | null;
+};
+
+type ContextHistoryFetchParams = {
+  sessionId?: string;
+  sessionKey?: string;
+  limit?: number;
 };
 
 type ExecApprovalsSnapshot = {
@@ -474,6 +484,53 @@ export async function handleInvoke(
       const env = sanitizeEnv(undefined);
       const payload = await handleSystemWhich(params, env);
       await sendJsonPayloadResult(client, frame, payload);
+    } catch (err) {
+      await sendInvalidRequestResult(client, frame, err);
+    }
+    return;
+  }
+
+  if (command === "context.history.fetch") {
+    try {
+      const params = decodeParams<ContextHistoryFetchParams>(frame.paramsJSON);
+      const cfg = loadConfig();
+      const sessionId = typeof params.sessionId === "string" ? params.sessionId.trim() : "";
+      const sessionKeyRaw = typeof params.sessionKey === "string" ? params.sessionKey.trim() : "";
+      if (!sessionId && !sessionKeyRaw) {
+        throw new Error("INVALID_REQUEST: sessionId or sessionKey required");
+      }
+      const resolvedKey =
+        sessionKeyRaw ||
+        (await (async () => {
+          const resolved = await resolveSessionKeyFromResolveParams({
+            cfg,
+            p: {
+              sessionId,
+              includeGlobal: true,
+              includeUnknown: true,
+            },
+          });
+          if (!resolved.ok) {
+            throw new Error(resolved.error.message);
+          }
+          return resolved.key;
+        })());
+
+      const { entry, storePath } = loadSessionEntry(resolvedKey);
+      const sessionFile = typeof entry?.sessionFile === "string" ? entry.sessionFile : undefined;
+      const sessionIdOut = typeof entry?.sessionId === "string" ? entry.sessionId : undefined;
+      const rawMessages =
+        sessionIdOut && storePath ? readSessionMessages(sessionIdOut, storePath, sessionFile) : [];
+      const requestedLimit =
+        typeof params.limit === "number" && Number.isFinite(params.limit) ? params.limit : 60;
+      const limit = Math.max(1, Math.min(200, Math.floor(requestedLimit)));
+      const sliced = rawMessages.length > limit ? rawMessages.slice(-limit) : rawMessages;
+      const sanitized = stripEnvelopeFromMessages(sliced);
+      await sendJsonPayloadResult(client, frame, {
+        sessionKey: resolvedKey,
+        sessionId: sessionIdOut,
+        messages: sanitized,
+      });
     } catch (err) {
       await sendInvalidRequestResult(client, frame, err);
     }
